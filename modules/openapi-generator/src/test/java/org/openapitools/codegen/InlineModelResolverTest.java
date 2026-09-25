@@ -1574,12 +1574,12 @@ public class InlineModelResolverTest {
         openapi.setComponents(new Components());
         openapi.setPaths(new Paths());
 
-        // ApiError and BetaApiError share a title and a structure, so BetaApiError is removed and
-        // ApiError (alphabetically first) is kept as canonical.
+        // ApiError and numbered duplicate ApiError_1 share a title and structure, so ApiError_1
+        // is removed and ApiError is kept as canonical.
         Schema apiError = new ObjectSchema()
                 .title("ApiError")
                 .addProperty("message", new StringSchema());
-        Schema betaApiError = new ObjectSchema()
+        Schema duplicateApiError = new ObjectSchema()
                 .title("ApiError")
                 .addProperty("message", new StringSchema());
         Schema notFound = new ObjectSchema()
@@ -1587,7 +1587,7 @@ public class InlineModelResolverTest {
                 .addProperty("detail", new StringSchema());
 
         openapi.getComponents().addSchemas("ApiError", apiError);
-        openapi.getComponents().addSchemas("BetaApiError", betaApiError);
+        openapi.getComponents().addSchemas("ApiError_1", duplicateApiError);
         openapi.getComponents().addSchemas("NotFound", notFound);
 
         // A discriminated union whose mapping points at the schema that is about to be removed.
@@ -1595,12 +1595,12 @@ public class InlineModelResolverTest {
                 .title("ErrorResponse")
                 .discriminator(new Discriminator()
                         .propertyName("type")
-                        .mapping("api_error", "#/components/schemas/BetaApiError")
+                        .mapping("api_error", "#/components/schemas/ApiError_1")
                         // the spec also allows a bare schema name as a mapping value
-                        .mapping("legacy_api_error", "BetaApiError")
+                        .mapping("legacy_api_error", "ApiError_1")
                         .mapping("not_found", "#/components/schemas/NotFound"));
         errorResponse.setOneOf(List.of(
-                new Schema<>().$ref("#/components/schemas/BetaApiError"),
+                new Schema<>().$ref("#/components/schemas/ApiError_1"),
                 new Schema<>().$ref("#/components/schemas/NotFound")));
         openapi.getComponents().addSchemas("ErrorResponse", errorResponse);
 
@@ -1608,7 +1608,7 @@ public class InlineModelResolverTest {
 
         Map<String, Schema> schemas = openapi.getComponents().getSchemas();
         assertNotNull("Canonical ApiError must survive deduplication", schemas.get("ApiError"));
-        assertNull("Duplicate BetaApiError must be removed", schemas.get("BetaApiError"));
+        assertNull("Duplicate ApiError_1 must be removed", schemas.get("ApiError_1"));
 
         Schema union = schemas.get("ErrorResponse");
         // Control: the oneOf $ref is rewritten (this already worked).
@@ -1617,7 +1617,7 @@ public class InlineModelResolverTest {
         // The defect: the discriminator mapping must follow the same rewrite.
         assertEquals("discriminator mapping must be rewritten to the canonical schema",
                 "#/components/schemas/ApiError", union.getDiscriminator().getMapping().get("api_error"));
-        // a bare-name mapping value is rewritten too, and stays a bare name
+        // a bare-name discriminator mapping value is rewritten too, and stays a bare name
         assertEquals("bare-name discriminator mapping must be rewritten, keeping the bare form",
                 "ApiError", union.getDiscriminator().getMapping().get("legacy_api_error"));
         assertEquals("an untouched mapping entry must be left alone",
@@ -1628,12 +1628,12 @@ public class InlineModelResolverTest {
     private static void addCanonicalAndDuplicate(OpenAPI openapi) {
         openapi.getComponents().addSchemas("Canonical",
                 new ObjectSchema().title("Thing").addProperty("name", new StringSchema()));
-        openapi.getComponents().addSchemas("Duplicate",
+        openapi.getComponents().addSchemas("Canonical_1",
                 new ObjectSchema().title("Thing").addProperty("name", new StringSchema()));
     }
 
     private static Schema refToDuplicate() {
-        return new Schema<>().$ref("#/components/schemas/Duplicate");
+        return new Schema<>().$ref("#/components/schemas/Canonical_1");
     }
 
     private static void assertRewritten(String carrier, Schema schema) {
@@ -1671,7 +1671,7 @@ public class InlineModelResolverTest {
 
         new InlineModelResolver().flatten(openapi);
 
-        assertNull("the duplicate must be removed", openapi.getComponents().getSchemas().get("Duplicate"));
+        assertNull("the duplicate must be removed", openapi.getComponents().getSchemas().get("Canonical_1"));
         Schema h = openapi.getComponents().getSchemas().get("Holder");
         assertRewritten("properties (control)", (Schema) h.getProperties().get("control"));
         assertRewritten("patternProperties", (Schema) h.getPatternProperties().get("^x-"));
@@ -1724,7 +1724,7 @@ public class InlineModelResolverTest {
 
         new InlineModelResolver().flatten(openapi);
 
-        assertNull("the duplicate must be removed", openapi.getComponents().getSchemas().get("Duplicate"));
+        assertNull("the duplicate must be removed", openapi.getComponents().getSchemas().get("Canonical_1"));
         assertRewritten("components/responses", openapi.getComponents().getResponses()
                 .get("SharedResponse").getContent().get("application/json").getSchema());
         assertRewritten("components/parameters", openapi.getComponents().getParameters()
@@ -1738,5 +1738,136 @@ public class InlineModelResolverTest {
         assertRewritten("response headers", response.getHeaders().get("X-Response").getSchema());
         assertRewritten("encoding headers", response.getContent().get("application/json")
                 .getEncoding().get("ok").getHeaders().get("X-Encoding").getSchema());
+    }
+
+    @Test
+    public void deduplicateComponentsDoesNotRemoveDistinctNamedSchemasWithSameTitle() {
+        OpenAPI openapi = new OpenAPI();
+        openapi.setComponents(new Components());
+        openapi.setPaths(new Paths());
+
+        Schema billingAddress = new ObjectSchema()
+                .title("Address")
+                .addProperty("street", new StringSchema());
+        Schema shippingAddress = new ObjectSchema()
+                .title("Address")
+                .addProperty("street", new StringSchema());
+
+        openapi.getComponents().addSchemas("BillingAddress", billingAddress);
+        openapi.getComponents().addSchemas("ShippingAddress", shippingAddress);
+
+        new InlineModelResolver().flatten(openapi);
+
+        Map<String, Schema> schemas = openapi.getComponents().getSchemas();
+        assertNotNull("BillingAddress must not be removed", schemas.get("BillingAddress"));
+        assertNotNull("ShippingAddress must not be removed", schemas.get("ShippingAddress"));
+    }
+
+    @Test
+    public void testDefsWithDuplicateTitleIssue24817() throws Exception {
+        String spec = "{\n" +
+                "  \"openapi\": \"3.1.0\",\n" +
+                "  \"info\": { \"title\": \"Cats and Dogs\", \"version\": \"1.0.0\" },\n" +
+                "  \"components\": {\n" +
+                "    \"schemas\": {\n" +
+                "      \"Cat\": {\n" +
+                "        \"properties\": {\n" +
+                "          \"name\": { \"$ref\": \"#/components/schemas/CatFields/$defs/catName\" }\n" +
+                "        }\n" +
+                "      },\n" +
+                "      \"CatFields\": {\n" +
+                "        \"$defs\": {\n" +
+                "          \"catName\": { \"type\": \"string\", \"title\": \"Given name\" }\n" +
+                "        }\n" +
+                "      },\n" +
+                "      \"Dog\": {\n" +
+                "        \"properties\": {\n" +
+                "          \"nickname\": { \"$ref\": \"#/components/schemas/DogFields/$defs/dogName\" }\n" +
+                "        }\n" +
+                "      },\n" +
+                "      \"DogFields\": {\n" +
+                "        \"$defs\": {\n" +
+                "          \"dogName\": { \"type\": \"string\", \"title\": \"Given name\" }\n" +
+                "        }\n" +
+                "      }\n" +
+                "    }\n" +
+                "  }\n" +
+                "}";
+        java.io.File temp = java.io.File.createTempFile("spec24817", ".json");
+        java.nio.file.Files.writeString(temp.toPath(), spec);
+        try {
+            io.swagger.v3.parser.core.models.ParseOptions options = new io.swagger.v3.parser.core.models.ParseOptions();
+            options.setResolve(true);
+            options.setResolveResponses(true);
+            OpenAPI openAPI = new OpenAPIParser().readLocation(temp.getAbsolutePath(), null, options).getOpenAPI();
+
+            new InlineModelResolver().flatten(openAPI);
+
+            Map<String, Schema> schemas = openAPI.getComponents().getSchemas();
+            assertNotNull("catName schema must not be removed", schemas.get("catName"));
+            assertNotNull("dogName schema must not be removed", schemas.get("dogName"));
+
+            DefaultCodegen codegen = new org.openapitools.codegen.languages.JavaClientCodegen();
+            codegen.setOpenAPI(openAPI);
+
+            CodegenModel catModel = codegen.fromModel("Cat", schemas.get("Cat"));
+            CodegenProperty catProp = catModel.vars.stream().filter(v -> "name".equals(v.name)).findFirst().orElse(null);
+            assertNotNull(catProp);
+            assertEquals("String", catProp.dataType);
+
+            CodegenModel dogModel = codegen.fromModel("Dog", schemas.get("Dog"));
+            CodegenProperty dogProp = dogModel.vars.stream().filter(v -> "nickname".equals(v.name)).findFirst().orElse(null);
+            assertNotNull(dogProp);
+            assertEquals("String", dogProp.dataType);
+        } finally {
+            temp.delete();
+        }
+    }
+
+    @Test
+    public void deduplicateComponentsPreservesDistinctNumberedSchemasWhenNoBaseSchemaExists() {
+        OpenAPI openapi = new OpenAPI();
+        openapi.setComponents(new Components());
+        openapi.setPaths(new Paths());
+
+        // Legitimate user-defined schemas Foo_1 and Foo_2 where no base schema Foo exists.
+        Schema foo1 = new ObjectSchema()
+                .title("Foo")
+                .addProperty("field", new StringSchema());
+        Schema foo2 = new ObjectSchema()
+                .title("Foo")
+                .addProperty("field", new StringSchema());
+
+        openapi.getComponents().addSchemas("Foo_1", foo1);
+        openapi.getComponents().addSchemas("Foo_2", foo2);
+
+        new InlineModelResolver().flatten(openapi);
+
+        Map<String, Schema> schemas = openapi.getComponents().getSchemas();
+        assertNotNull("Foo_1 must not be removed", schemas.get("Foo_1"));
+        assertNotNull("Foo_2 must not be removed", schemas.get("Foo_2"));
+    }
+
+    @Test
+    public void deduplicateComponentsPreservesDifferentDelimitedSchemasWithSameTitle() {
+        OpenAPI openapi = new OpenAPI();
+        openapi.setComponents(new Components());
+        openapi.setPaths(new Paths());
+
+        Schema userProfile = new ObjectSchema()
+                .title("UserProfile")
+                .addProperty("name", new StringSchema());
+        Schema user_profile = new ObjectSchema()
+                .title("UserProfile")
+                .addProperty("name", new StringSchema());
+
+        openapi.getComponents().addSchemas("UserProfile", userProfile);
+        openapi.getComponents().addSchemas("User_Profile", user_profile);
+
+        new InlineModelResolver().flatten(openapi);
+
+        Map<String, Schema> schemas = openapi.getComponents().getSchemas();
+        assertNotNull("UserProfile must not be removed", schemas.get("UserProfile"));
+        assertNotNull("User_Profile must not be removed", schemas.get("User_Profile"));
     }
 }

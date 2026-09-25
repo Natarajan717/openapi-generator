@@ -1204,9 +1204,29 @@ public class InlineModelResolver {
     }
 
     /**
-     * Post-flatten deduplication pass: removes titled component schemas that are structural
-     * duplicates of each other (same title + same structural signature under structuralMapper)
-     * and rewrites all $refs throughout the spec to point to the canonical (non-numbered) name.
+     * If `name` ends with `_\\d+` and removing that suffix yields an existing schema name
+     * in `components/schemas`, returns that existing base schema name; otherwise returns `name`.
+     *
+     * This ensures only numbered duplicates of an existing base schema (e.g. Flow_Segment_1
+     * when Flow_Segment exists) share the base name for deduplication, while distinct user-defined
+     * schemas (such as Foo_1 and Foo_2 when Foo does not exist, or User_Profile vs UserProfile)
+     * are never collapsed.
+     */
+    private static String getExistingBaseName(String name, Set<String> existingNames) {
+        if (name.matches(".*_\\d+$")) {
+            String stripped = name.replaceAll("_\\d+$", "");
+            if (existingNames.contains(stripped)) {
+                return stripped;
+            }
+        }
+        return name;
+    }
+
+    /**
+     * Post-flatten deduplication pass: removes titled component schemas that are numbered
+     * duplicates of each other (same base name + same title + same structural signature under
+     * structuralMapper) and rewrites all $refs throughout the spec to point to the canonical
+     * (non-numbered) name.
      *
      * This handles the case where the Swagger Parser shares mutable Schema objects across
      * usages of the same external file and mutates their fields (e.g. stripping type or
@@ -1219,8 +1239,9 @@ public class InlineModelResolver {
             return;
         }
 
+        Set<String> schemaNames = schemas.keySet();
         // Sort: non-numbered names first so we always pick them as canonical over numbered ones.
-        List<String> sortedKeys = new ArrayList<>(schemas.keySet());
+        List<String> sortedKeys = new ArrayList<>(schemaNames);
         sortedKeys.sort((a, b) -> {
             boolean aNumbered = a.matches(".*_\\d+$");
             boolean bNumbered = b.matches(".*_\\d+$");
@@ -1228,9 +1249,9 @@ public class InlineModelResolver {
             return a.compareTo(b);
         });
 
-        // Map: (title + "||" + structural_sig) → first-seen (canonical) name
+        // Map: (base_name + "||" + title + "||" + structural_sig) -> first-seen (canonical) name
         Map<String, String> canonicalBySig = new LinkedHashMap<>();
-        // Map: duplicate component name → canonical component name
+        // Map: duplicate component name -> canonical component name
         Map<String, String> duplicateToCanonical = new LinkedHashMap<>();
 
         for (String name : sortedKeys) {
@@ -1240,10 +1261,13 @@ public class InlineModelResolver {
             }
             try {
                 String structural = computeStructuralSignature(schema);
-                String sigKey = schema.getTitle() + "||" + structural;
+                String baseName = getExistingBaseName(name, schemaNames);
+                String sigKey = baseName + "||" + schema.getTitle() + "||" + structural;
                 String canonical = canonicalBySig.get(sigKey);
                 if (canonical != null) {
-                    duplicateToCanonical.put(name, canonical);
+                    if (name.matches(".*_\\d+$") && !name.equals(canonical)) {
+                        duplicateToCanonical.put(name, canonical);
+                    }
                 } else {
                     canonicalBySig.put(sigKey, name);
                 }

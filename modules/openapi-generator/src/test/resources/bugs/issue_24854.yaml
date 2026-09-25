@@ -1,0 +1,75 @@
+openapi: 3.0.0
+info:
+  title: Primitive and Binary Response Test
+  version: 1.0.0
+paths:
+  /text:
+    get:
+      operationId: getText
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/plain:
+              schema:
+                type: string
+    post:
+      operationId: postText
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: Echo response
+          content:
+            text/plain:
+              schema:
+                type: string
+  /file:
+    get:
+      operationId: getFile
+      responses:
+        '200':
+          description: Binary response
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+    post:
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Binary upload response
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+  /model:
+    get:
+      operationId: getModel
+      responses:
+        '200':
+          description: Model response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MyModel'
+components:
+  schemas:
+    MyModel:
+      type: object
+      properties:
+        id:
+          type: integer

@@ -209,6 +209,15 @@ public class CppHttplibServerCodegen extends AbstractCppCodegen {
         typeMapping.put("object", "nlohmann::json");
         typeMapping.put("array", "std::vector");
         typeMapping.put("file", "std::string");
+        typeMapping.put("File", "std::string");
+        typeMapping.put("Binary", "std::string");
+        typeMapping.put("String", "std::string");
+        typeMapping.put("Date", "std::string");
+        typeMapping.put("DateTime", "std::string");
+        typeMapping.put("UUID", "std::string");
+        typeMapping.put("URI", "std::string");
+        typeMapping.put("Object", "nlohmann::json");
+        typeMapping.put("AnyType", "nlohmann::json");
         typeMapping.put("oas_any_type_not_mapped", "nlohmann::json");
 
         // Only mapped C++ types as primitives
@@ -369,12 +378,19 @@ public class CppHttplibServerCodegen extends AbstractCppCodegen {
 
         objs.put("apiNamespace", apiNamespace);
 
-        // Build a lookup map: PascalCase className -> modelNamespace
+        // Build a lookup map: PascalCase className -> modelNamespace and set of all model names
         Map<String, String> modelNamespaceMap = new HashMap<>();
-        for (ModelMap modelMap : allModels) {
-            CodegenModel model = modelMap.getModel();
-            if (model != null && model.vendorExtensions.containsKey("modelNamespace")) {
-                modelNamespaceMap.put(model.classname, (String) model.vendorExtensions.get("modelNamespace"));
+        Set<String> allModelNames = new HashSet<>();
+        if (allModels != null) {
+            for (ModelMap modelMap : allModels) {
+                CodegenModel model = modelMap.getModel();
+                if (model != null) {
+                    allModelNames.add(model.classname);
+                    allModelNames.add(toPascalCase(model.classname));
+                    if (model.vendorExtensions.containsKey("modelNamespace")) {
+                        modelNamespaceMap.put(model.classname, (String) model.vendorExtensions.get("modelNamespace"));
+                    }
+                }
             }
         }
 
@@ -390,6 +406,9 @@ public class CppHttplibServerCodegen extends AbstractCppCodegen {
             }
             // Add modelNamespace to vendorExtensions
             String modelNamespace = (String) additionalProperties.get(MODEL_NAMESPACE);
+            if (modelNamespace == null || modelNamespace.isEmpty()) {
+                modelNamespace = MODEL_SUFFIX.toLowerCase(Locale.ROOT);
+            }
             final String apiNamespacetoFilter = apiNamespace;
             //Filter common words in api and model namespaces
             String namespaceFiltered = Arrays.stream(modelNamespace.toLowerCase(Locale.ROOT).split("::"))
@@ -399,14 +418,31 @@ public class CppHttplibServerCodegen extends AbstractCppCodegen {
             if (op.bodyParam != null && op.bodyParam.baseType != null) {
                 String className = op.bodyParam.baseType;
                 String requestModel = toPascalCase(className);
-                op.vendorExtensions.put("requestModel", requestModel);
+                boolean isModel = allModelNames.contains(requestModel) || allModelNames.contains(className)
+                        || (!typeMapping.containsKey(className) && !typeMapping.containsKey(className.toLowerCase(Locale.ROOT)) && Boolean.TRUE.equals(op.bodyParam.isModel));
 
-                // Set bodyParam dataType with namespace prefix
-                if (!namespaceFiltered.isEmpty()) {
-                    op.vendorExtensions.put("requestModelNamespace", namespaceFiltered);
-                    op.bodyParam.dataType = namespaceFiltered + "::" + requestModel;
+                if (isModel) {
+                    op.vendorExtensions.put("requestModel", requestModel);
+
+                    // Set bodyParam dataType with namespace prefix
+                    if (!namespaceFiltered.isEmpty()) {
+                        op.vendorExtensions.put("requestModelNamespace", namespaceFiltered);
+                        op.bodyParam.dataType = namespaceFiltered + "::" + requestModel;
+                    } else {
+                        op.bodyParam.dataType = requestModel;
+                    }
+
+                    if (allModelNames.contains(requestModel) || allModelNames.contains(className)) {
+                        modelsUsed.add(requestModel);
+                    }
                 } else {
-                    op.bodyParam.dataType = requestModel;
+                    String mappedType = typeMapping.get(className);
+                    if (mappedType == null) {
+                        mappedType = typeMapping.get(className.toLowerCase(Locale.ROOT));
+                    }
+                    if (mappedType != null) {
+                        op.bodyParam.dataType = mappedType;
+                    }
                 }
 
                 // Wrap in std::optional if not required
@@ -415,7 +451,6 @@ public class CppHttplibServerCodegen extends AbstractCppCodegen {
                 }
 
                 includeOptionalHeader = true;
-                modelsUsed.add(requestModel);
             }
             // Add type flags for query and header params for template type conversion
             if (op.queryParams != null) {
@@ -617,14 +652,21 @@ public class CppHttplibServerCodegen extends AbstractCppCodegen {
                         hasAnyResponseSchema = true;
                         String successType;
                         String successConstName;
-                        if (!typeMapping.containsKey(resp.baseType)) {
-                            String className = toPascalCase(resp.baseType);
+                        String baseType = resp.baseType;
+                        String mappedType = typeMapping.get(baseType);
+                        if (mappedType == null) {
+                            mappedType = typeMapping.get(baseType.toLowerCase(Locale.ROOT));
+                        }
+                        if (mappedType == null && (allModelNames.contains(baseType) || allModelNames.contains(toPascalCase(baseType)) || Boolean.TRUE.equals(resp.isModel))) {
+                            String className = toPascalCase(baseType);
                             successType = namespaceFiltered + "::" + className;
-                            modelsUsed.add(className);
+                            if (allModelNames.contains(className) || allModelNames.contains(baseType)) {
+                                modelsUsed.add(className);
+                            }
                             successConstName = HTTP_RESPONSE_PREFIX + StringUtils.underscore(className).toUpperCase(Locale.ROOT);
                         } else {
-                            successType = typeMapping.get(resp.baseType);
-                            successConstName = HTTP_RESPONSE_PREFIX + "PRIMITIVE_" + StringUtils.underscore(resp.baseType).toUpperCase(Locale.ROOT);
+                            successType = mappedType != null ? mappedType : (resp.dataType != null ? resp.dataType : baseType);
+                            successConstName = HTTP_RESPONSE_PREFIX + "PRIMITIVE_" + StringUtils.underscore(baseType).toUpperCase(Locale.ROOT);
                             isSuccessResponsePrimitive = true;
                         }
                         // Only add if not already in set (deduplication across all responses)
@@ -652,16 +694,22 @@ public class CppHttplibServerCodegen extends AbstractCppCodegen {
                         if (errorBaseType != null && !errorBaseType.isEmpty()) {
                             hasAnyResponseSchema = true;
                             String errorType = "";
-                            if (!typeMapping.containsKey(errorBaseType)) {
+                            String mappedTypeError = typeMapping.get(errorBaseType);
+                            if (mappedTypeError == null) {
+                                mappedTypeError = typeMapping.get(errorBaseType.toLowerCase(Locale.ROOT));
+                            }
+                            if (mappedTypeError == null && (allModelNames.contains(errorBaseType) || allModelNames.contains(toPascalCase(errorBaseType)) || Boolean.TRUE.equals(resp.isModel))) {
                                 String className = toPascalCase(errorBaseType);
                                 errorType = namespaceFiltered + "::" + className;
-                                modelsUsed.add(className);
+                                if (allModelNames.contains(className) || allModelNames.contains(errorBaseType)) {
+                                    modelsUsed.add(className);
+                                }
                                 errorConstName = HTTP_RESPONSE_PREFIX + StringUtils.underscore(className).toUpperCase(Locale.ROOT);
                                 // errorTypeIsEnum = Boolean.TRUE.equals(classNameIsEnumMap.get(toPascalCase(className)));
                             } else {
                                 isErrorResponsePrimitive = true;
-                                errorType = typeMapping.get(resp.baseType);
-                                errorConstName = HTTP_RESPONSE_PREFIX + "PRIMITIVE_" + StringUtils.underscore(resp.baseType).toUpperCase(Locale.ROOT);
+                                errorType = mappedTypeError != null ? mappedTypeError : (resp.dataType != null ? resp.dataType : errorBaseType);
+                                errorConstName = HTTP_RESPONSE_PREFIX + "PRIMITIVE_" + StringUtils.underscore(errorBaseType).toUpperCase(Locale.ROOT);
                             }
 
                             if (errorConstName != null && !errorConstName.isEmpty()) {
@@ -2120,6 +2168,13 @@ public class CppHttplibServerCodegen extends AbstractCppCodegen {
             enumNamespace = toPascalCase(ENUM_SUFFIX);
         }
         additionalProperties.put(ENUM_NAMESPACE, enumNamespace);
+
+        // Set Model namespace
+        String modelNamespace = (String) additionalProperties.get(MODEL_NAMESPACE);
+        if (modelNamespace == null || modelNamespace.isEmpty()) {
+            modelNamespace = MODEL_SUFFIX.toLowerCase(Locale.ROOT);
+        }
+        additionalProperties.put(MODEL_NAMESPACE, modelNamespace);
 
         // Set API namespace for templates (needed for AuthenticationManager and other supporting files)
         String apiNamespaceValue = (String) additionalProperties.get(API_NAMESPACE);

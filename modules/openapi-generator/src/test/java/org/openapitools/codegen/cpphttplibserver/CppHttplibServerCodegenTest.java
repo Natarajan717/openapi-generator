@@ -17,10 +17,17 @@ package org.openapitools.codegen.cpphttplib;
 
 import static org.openapitools.codegen.utils.StringUtils.underscore;
 
+import org.apache.commons.io.FileUtils;
 import org.openapitools.codegen.*;
+import org.openapitools.codegen.config.CodegenConfigurator;
 import org.openapitools.codegen.languages.CppHttplibServerCodegen;
 import org.testng.Assert;
 import org.testng.annotations.Test;
+
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
 
 public class CppHttplibServerCodegenTest {
 
@@ -143,5 +150,87 @@ public class CppHttplibServerCodegenTest {
         codegen.processOpts();
         
         Assert.assertEquals(codegen.additionalProperties().get("apiNamespace"), "myapp::api");
+    }
+
+    @Test
+    public void testPrimitiveResponseIssue24854() throws Exception {
+        Path target = Files.createTempDirectory("test_issue_24854");
+        try {
+            ClientOptInput clientOptInput = new CodegenConfigurator()
+                    .setGeneratorName("cpp-httplib-server")
+                    .setInputSpec("src/test/resources/bugs/issue_24854.yaml")
+                    .setOutputDir(target.toAbsolutePath().toString())
+                    .toClientOptInput();
+
+            DefaultGenerator generator = new DefaultGenerator();
+            List<File> files = generator.opts(clientOptInput).generate();
+
+            Assert.assertTrue(files.size() > 0);
+
+            // Verify fake models are not generated
+            File stringModelHeader = new File(target.toFile(), "models/String.h");
+            Assert.assertFalse(stringModelHeader.exists(), "models/String.h should not exist");
+            File fileModelHeader = new File(target.toFile(), "models/File.h");
+            Assert.assertFalse(fileModelHeader.exists(), "models/File.h should not exist");
+
+            // Verify legitimate model is generated
+            File myModelHeader = new File(target.toFile(), "models/MyModel.h");
+            Assert.assertTrue(myModelHeader.exists(), "models/MyModel.h should exist");
+
+            // Verify api header does not include fake model headers
+            File apiHeader = new File(target.toFile(), "api/CppHttplibServerapiApi.h");
+            Assert.assertTrue(apiHeader.exists(), "api/CppHttplibServerapiApi.h should exist");
+            String apiHeaderContent = Files.readString(apiHeader.toPath());
+            Assert.assertFalse(apiHeaderContent.contains("#include \"models/String.h\""), "Should not include models/String.h");
+            Assert.assertFalse(apiHeaderContent.contains("#include \"models/File.h\""), "Should not include models/File.h");
+            Assert.assertTrue(apiHeaderContent.contains("#include \"models/MyModel.h\""), "Should include models/MyModel.h");
+            Assert.assertTrue(apiHeaderContent.contains("using FileGetResponse = std::string;"), "FileGetResponse should be std::string");
+            Assert.assertTrue(apiHeaderContent.contains("using TextGetResponse = std::string;"), "TextGetResponse should be std::string");
+            Assert.assertTrue(apiHeaderContent.contains("using ModelGetResponse = models::MyModel;"), "ModelGetResponse should be models::MyModel");
+        } finally {
+            FileUtils.deleteDirectory(target.toFile());
+        }
+    }
+
+    @Test
+    public void testSpecWithoutModelsIssue24854() throws Exception {
+        Path target = Files.createTempDirectory("test_issue_24854_no_models");
+        try {
+            String spec = "openapi: 3.0.0\n" +
+                    "info:\n" +
+                    "  title: Minimal API\n" +
+                    "  version: 1.0.0\n" +
+                    "paths:\n" +
+                    "  /ping:\n" +
+                    "    get:\n" +
+                    "      operationId: ping\n" +
+                    "      responses:\n" +
+                    "        '200':\n" +
+                    "          description: OK\n" +
+                    "          content:\n" +
+                    "            text/plain:\n" +
+                    "              schema:\n" +
+                    "                type: string\n";
+            File specFile = new File(target.toFile(), "spec.yaml");
+            Files.writeString(specFile.toPath(), spec);
+
+            ClientOptInput clientOptInput = new CodegenConfigurator()
+                    .setGeneratorName("cpp-httplib-server")
+                    .setInputSpec(specFile.getAbsolutePath())
+                    .setOutputDir(target.toAbsolutePath().toString())
+                    .toClientOptInput();
+
+            DefaultGenerator generator = new DefaultGenerator();
+            List<File> files = generator.opts(clientOptInput).generate();
+            Assert.assertTrue(files.size() > 0);
+
+            File apiHeader = new File(target.toFile(), "api/CppHttplibServerapiApi.h");
+            Assert.assertTrue(apiHeader.exists(), "api/CppHttplibServerapiApi.h should exist");
+            String apiHeaderContent = Files.readString(apiHeader.toPath());
+            Assert.assertFalse(apiHeaderContent.contains("#include \"models/String.h\""));
+            Assert.assertTrue(apiHeaderContent.contains("using PingGetResponse = std::string;"));
+        } finally {
+            FileUtils.deleteDirectory(target.toFile());
+        }
     }
 }
